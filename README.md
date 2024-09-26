@@ -18,3 +18,21 @@ The Incoming Connection Logger is a Bash script designed to monitor and log inco
 1. **Clone the Repository**: 
    ```bash
    git clone https://gitlab.com/jaskaranhundal/incoming-connection-logger.git
+2. **Navigate to the Directory**:
+   ```bash
+   cd incoming-connection-logger
+
+3. Run the Script:
+   ```bash
+   bash incoming_connection_log.sh
+4. **Review Logged Connections: Monitor the incoming_connection_log.csv file for detailed records of incoming connections.**
+
+##Dependencies
+The script requires the ss command, which is typically available in most Linux distributions. Ensure you have the necessary permissions to run the script for monitoring network activities.
+
+##License
+This project is licensed under the MIT License. Refer to the LICENSE file for more details.
+
+##Contributions
+Contributions to this project are welcome! If you find any issues or have suggestions for enhancements, please open an issue or submit a pull request.
+
