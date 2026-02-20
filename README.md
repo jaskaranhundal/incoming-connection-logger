@@ -1,38 +1,45 @@
-# Incoming Connection Logger
+# incoming-connection-logger
 
-## Overview
-The Incoming Connection Logger is a Bash script designed to monitor and log incoming network connections on a Linux system. This tool provides network administrators and users with insights into active connections, enhancing security and facilitating troubleshooting.
+Bash script for continuously capturing inbound network connection metadata and storing deduplicated records for operational security visibility.
 
-## Key Features
-- **Real-time Monitoring**: Performs scans for new incoming connections every 10 seconds, ensuring up-to-date information on network activity.
-- **Detailed Logging**: Logs critical connection details, including:
-  - **Source IP**: The IP address from which the connection originates.
-  - **Destination IP**: The IP address of the system receiving the connection.
-  - **Source Port**: The port number on the source machine.
-  - **Destination Port**: The port number on the destination machine.
-  - **Process Information**: The name and PID (Process ID) of the process associated with the connection.
-- **CSV Output**: Stores all logged connections in a CSV file (`incoming_connection_log.csv`), allowing for easy analysis and data manipulation.
-- **Duplicate Connection Check**: Prevents logging of previously recorded connections to ensure unique entries.
+## Problem
+Teams without lightweight network telemetry often miss early signs of unauthorized inbound activity. Native tools exist, but repeated manual inspection is slow and inconsistent.
 
-## How to Use
-1. **Clone the Repository**: 
-   ```bash
-   git clone https://gitlab.com/jaskaranhundal/incoming-connection-logger.git
-2. **Navigate to the Directory**:
-   ```bash
-   cd incoming-connection-logger
+## Security Context
+- Creates a timestamped record of inbound connections for triage and investigations.
+- Captures source/destination details and process metadata for faster incident response.
+- Reduces blind spots in host-level network monitoring.
 
-3. Run the Script:
-   ```bash
-   bash incoming_connection_log.sh
-4. **Review Logged Connections: Monitor the incoming_connection_log.csv file for detailed records of incoming connections.**
+## Architecture/Flow
+![Connection logger flow](docs/connection-flow.svg)
 
-## Dependencies
-The script requires the ss command, which is typically available in most Linux distributions. Ensure you have the necessary permissions to run the script for monitoring network activities.
+## Setup
+```bash
+git clone git@github.com:jaskaranhundal/incoming-connection-logger.git
+cd incoming-connection-logger
+chmod +x incoming_connection_log.sh
+./incoming_connection_log.sh
+```
 
-## License
-This project is licensed under the MIT License. Refer to the LICENSE file for more details.
+Requirements:
+- Linux environment
+- `ss` command available
+- Permissions to inspect socket/process details
 
-## Contributions
-Contributions to this project are welcome! If you find any issues or have suggestions for enhancements, please open an issue or submit a pull request.
+## Example Output
+```text
+Timestamp,Source IP,Destination IP,Source Port,Destination Port,Process
+2026-02-20T09:00:01Z,10.1.0.45,10.1.0.10,54321,22,sshd(1290)
+2026-02-20T09:00:11Z,198.51.100.20,10.1.0.10,50012,443,nginx(842)
+```
 
+## Limitations
+- Host-level only (not full network tap/packet capture).
+- Deduplication is best-effort and tuned for repetitive socket entries.
+- No built-in SIEM export pipeline yet.
+
+## Roadmap
+- Add JSON output mode for log forwarding.
+- Add allowlist/denylist filters.
+- Add systemd service unit and retention policy support.
+- Add severity tagging for suspicious source patterns.
