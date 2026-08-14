@@ -22,7 +22,11 @@ Environment: OUTPUT_FILE, INTERVAL, VERBOSE override the defaults.
 EOF
 }
 
-log() { [[ "$VERBOSE" == "1" ]] && printf '[%s] %s\n' "$(date -u +%H:%M:%S)" "$*" >&2 || true; }
+log() {
+    if [[ "$VERBOSE" == "1" ]]; then
+        printf '[%s] %s\n' "$(date -u +%H:%M:%S)" "$*" >&2
+    fi
+}
 
 # Peers already written to the CSV, newline-delimited. Keyed peer_ip:peer_port:local_port
 # so a peer that disconnects and reconnects on a new ephemeral port is logged as new.
@@ -60,7 +64,7 @@ seed_seen() {
 }
 
 scan() {
-    local ss_output line local_ep peer_ep process key ts
+    local ss_output local_ep peer_ep process key ts
     # ss column order: Netid Recv-Q Send-Q Local-Address:Port Peer-Address:Port [Process]
     ss_output=$(ss -Hntu state established -p 2>/dev/null || true)
     [[ -z "$ss_output" ]] && { log "no established connections"; return 0; }
