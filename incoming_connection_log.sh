@@ -1,102 +1,127 @@
-#!/bin/bash
+#!/usr/bin/env bash
+#
+# Logs newly-observed established inbound connections to a CSV for security triage.
+# Each row is timestamped, so the log answers "when did this peer first appear".
 
-# File to store the output (CSV format)
-output_file="incoming_connection_log.csv"
+set -euo pipefail
 
-# Print headers for the CSV file if the file doesn't exist
-if [[ ! -f $output_file ]]; then
-    echo "S.No,Source IP,Destination IP,Source Port,Destination Port,Process (PID)" > $output_file
-fi
+OUTPUT_FILE="${OUTPUT_FILE:-incoming_connection_log.csv}"
+INTERVAL="${INTERVAL:-10}"
+VERBOSE="${VERBOSE:-0}"
 
-# Declare associative arrays to store unique connections for current and previous scans
-declare -A old_connections
-declare -A new_connections
+usage() {
+    cat <<'EOF'
+Usage: incoming_connection_log.sh [-o FILE] [-i SECONDS] [-v] [-1]
 
-# Initialize serial number (based on the existing entries in the CSV file)
-serial_number=$(($(tail -n +2 $output_file | wc -l) + 1))
+  -o FILE     CSV output path        (default: incoming_connection_log.csv)
+  -i SECONDS  Poll interval          (default: 10)
+  -v          Verbose progress to stderr
+  -1          Single scan, then exit (for cron and tests)
 
-# Perform the current scan and store connections in new_connections array
-perform_scan() {
-    new_connections=()
-
-    echo "Performing scan for incoming connections..."
-    ss_output=$(ss -ntu state established -p) # Capture the output
-    echo -e "Raw ss output:\n$ss_output\n"  # Print raw output
-
-    # Process the ss output with awk and read it directly into the loop
-    while read -r src_ip dst_ip src_port dst_port process; do
-        # Debugging: print what is being read
-        echo "Read from awk: src_ip='$src_ip', dst_ip='$dst_ip', src_port='$src_port', dst_port='$dst_port', process='$process'"
-
-        # Check if all variables are populated
-        if [[ -n "$src_ip" && -n "$dst_ip" && -n "$src_port" && -n "$dst_port" ]]; then
-            connection_key="$src_ip:$dst_ip:$src_port:$dst_port"
-            new_connections[$connection_key]="$src_ip,$dst_ip,$src_port,$dst_port,$process"
-            
-            # Debugging: Print the connection key and the value being assigned
-            echo "Adding to new_connections: $connection_key -> ${new_connections[$connection_key]}"
-        else
-            echo "Warning: One of the fields is empty. Skipping this connection."
-        fi
-    done < <(echo "$ss_output" | awk 'NR>1 {
-        split($4, src, ":"); 
-        split($5, dst, ":"); 
-        print src[1], dst[1], src[2], dst[2], $6
-    }')
-
-    # Display the count and contents of new connections
-    echo "Number of new connections after processing: ${#new_connections[@]}"
-    for conn in "${!new_connections[@]}"; do
-        echo "New connection: $conn -> ${new_connections[$conn]}"
-    done
+Environment: OUTPUT_FILE, INTERVAL, VERBOSE override the defaults.
+EOF
 }
 
-# Compare old and new connections, and add only new connections to the CSV file
-compare_and_log_new_connections() {
-    echo "Comparing connections..."
-    for connection_key in "${!new_connections[@]}"; do
-        echo "Checking connection: $connection_key"
-        # If old_connections is empty (first run) or connection from new_connections is not found in old_connections, add it to the log
-        if [[ -z "${old_connections[$connection_key]}" ]]; then
-            csv_entry="${serial_number},${new_connections[$connection_key]}"
-
-            # Log the connection details in CSV format
-            echo "$csv_entry" >> $output_file
-
-            # Increment the serial number
-            ((serial_number++))
-            echo "Logged new connection: $csv_entry"
-        fi
-    done
+log() {
+    if [[ "$VERBOSE" == "1" ]]; then
+        printf '[%s] %s\n' "$(date -u +%H:%M:%S)" "$*" >&2
+    fi
 }
 
-# Copy new_connections to old_connections for the next scan
-update_old_connections() {
-    # Clear the old_connections array
-    old_connections=()
+# Peers already written to the CSV, newline-delimited. Keyed peer_ip:peer_port:local_port
+# so a peer that disconnects and reconnects on a new ephemeral port is logged as new.
+# A flat string rather than declare -A: bash 3.2 has no associative arrays.
+seen=$'\n'
 
-    # Copy each entry from new_connections to old_connections
-    for connection_key in "${!new_connections[@]}"; do
-        old_connections[$connection_key]="${new_connections[$connection_key]}"
-    done
+# ss quotes nothing and its process column embeds commas
+# (users:(("mongod",pid=1,fd=4))), which corrupts a naive CSV write.
+csv_field() {
+    local v=${1//\"/\"\"}
+    printf '"%s"' "$v"
 }
 
-# Main function to run the monitoring process
-monitor_incoming_connections() {
+# Splitting host:port on the FIRST colon breaks every IPv6 address.
+# The port is always after the LAST colon.
+split_hostport() {
+    SPLIT_HOST="${1%:*}"
+    SPLIT_PORT="${1##*:}"
+    SPLIT_HOST="${SPLIT_HOST#[}"
+    SPLIT_HOST="${SPLIT_HOST%]}"
+}
+
+# Rebuild state from the CSV so -1/cron runs and restarts do not re-log known peers.
+# Fields 1-5 are timestamps, IPs and ports: never contain a comma or quote.
+seed_seen() {
+    [[ -f "$OUTPUT_FILE" ]] || return 0
+    local n=0 src_ip src_port dst_port
+    while IFS=, read -r _ts src_ip src_port _dst_ip dst_port _rest; do
+        src_ip=${src_ip//\"/}; src_port=${src_port//\"/}; dst_port=${dst_port//\"/}
+        [[ "$src_ip" == "source_ip" || -z "$src_ip" ]] && continue
+        seen="${seen}${src_ip}:${src_port}:${dst_port}"$'\n'
+        n=$((n + 1))
+    done < "$OUTPUT_FILE"
+    log "seeded $n known connections from $OUTPUT_FILE"
+}
+
+scan() {
+    local ss_output local_ep peer_ep process key ts
+    # ss column order: Netid Recv-Q Send-Q Local-Address:Port Peer-Address:Port [Process]
+    ss_output=$(ss -Hntu state established -p 2>/dev/null || true)
+    [[ -z "$ss_output" ]] && { log "no established connections"; return 0; }
+
+    while read -r _netid _rq _sq local_ep peer_ep process; do
+        [[ -z "${peer_ep:-}" ]] && continue
+
+        # Local side is US (the destination of an inbound connection);
+        # peer is the remote source. The original script had these reversed.
+        split_hostport "$local_ep"; local dst_ip="$SPLIT_HOST" dst_port="$SPLIT_PORT"
+        split_hostport "$peer_ep";  local src_ip="$SPLIT_HOST" src_port="$SPLIT_PORT"
+
+        key="${src_ip}:${src_port}:${dst_port}"
+        case "$seen" in *$'\n'"$key"$'\n'*) continue ;; esac
+        seen="${seen}${key}"$'\n'
+
+        ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        printf '%s,%s,%s,%s,%s,%s\n' \
+            "$(csv_field "$ts")" \
+            "$(csv_field "$src_ip")" "$(csv_field "$src_port")" \
+            "$(csv_field "$dst_ip")" "$(csv_field "$dst_port")" \
+            "$(csv_field "${process:-}")" >> "$OUTPUT_FILE"
+        log "new connection ${src_ip}:${src_port} -> ${dst_ip}:${dst_port}"
+    done <<< "$ss_output"
+}
+
+main() {
+    local once=0
+    while getopts ":o:i:v1h" opt; do
+        case "$opt" in
+            o) OUTPUT_FILE="$OPTARG" ;;
+            i) INTERVAL="$OPTARG" ;;
+            v) VERBOSE=1 ;;
+            1) once=1 ;;
+            h) usage; exit 0 ;;
+            *) usage >&2; exit 2 ;;
+        esac
+    done
+
+    command -v ss >/dev/null || { echo "error: 'ss' not found (iproute2 required)" >&2; exit 1; }
+
+    if [[ ! -f "$OUTPUT_FILE" ]]; then
+        echo "timestamp_utc,source_ip,source_port,destination_ip,destination_port,process" > "$OUTPUT_FILE"
+    fi
+
+    seed_seen
+    trap 'log "stopping"; exit 0' INT TERM
+
+    if [[ "$once" == "1" ]]; then
+        scan
+        return 0
+    fi
+
     while true; do
-        perform_scan  # Perform the current scan
-
-        # Compare new connections with the old ones and log only new connections
-        compare_and_log_new_connections
-
-        # After logging, update the old_connections array
-        update_old_connections
-
-        # Sleep for 10 seconds before checking again
-        sleep 10
+        scan
+        sleep "$INTERVAL"
     done
 }
 
-# Run the function to monitor connections
-monitor_incoming_connections
-jaskarn_singh@lindera-mongod
+main "$@"
